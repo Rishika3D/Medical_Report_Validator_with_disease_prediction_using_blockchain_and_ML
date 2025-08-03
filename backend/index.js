@@ -5,24 +5,24 @@ import mammoth from 'mammoth';
 import PdfParse from 'pdf-parse';
 import fs from 'fs';
 import path from 'path';
-import { createHelia } from 'helia';
-import { strings } from '@helia/strings';
 import { keccak256 } from 'js-sha3';
 import rateLimit from 'express-rate-limit';
 import { ethers } from 'ethers';
-import contractABI from './YourContract.json' assert { type: "json" };
 import dotenv from 'dotenv';
+import { createHelia } from 'helia';
+import { strings } from '@helia/strings';
+import contractJSON from './abi/ReportValidator.json' assert { type: 'json' }; // 👈 ABI import
 
 dotenv.config();
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
-// Rate Limiter
+// Apply rate limiter
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  message: 'Too many requests, try again later.'
+  message: 'Too many requests from this IP, please try again after 15 minutes.'
 });
 
 app.use(cors());
@@ -30,12 +30,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(limiter);
 
-// Blockchain setup
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractABI, wallet);
-
-// Helia setup
+// Helia setup for IPFS
 const helia = await createHelia();
 const s = strings(helia);
 
@@ -50,6 +45,16 @@ const upload = multer({
   }
 });
 
+// 🧠 Ethers setup
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+const contract = new ethers.Contract(
+  process.env.CONTRACT_ADDRESS,
+  contractJSON.abi,
+  signer
+);
+
+// 📤 Upload Endpoint
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
@@ -69,19 +74,20 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     fs.unlinkSync(file.path);
 
+    // Upload to IPFS and generate hash
     const textCID = await s.addString(text);
     const hash = keccak256(text);
     const hashCID = await s.addString(hash);
 
-    // Send to smart contract
-    const tx = await contract.uploadReport('0x' + hash);
+    //  Smart contract call
+    const tx = await contract.uploadReport('0x' + hash, textCID.toString());
     await tx.wait();
 
     res.status(200).json({
       textCID: textCID.toString(),
       hashCID: hashCID.toString(),
       hashPreview: hash.slice(0, 20),
-      textPreview: text.slice(0, 500)
+      txHash: tx.hash
     });
   } catch (err) {
     console.error('Upload error:', err.message);
