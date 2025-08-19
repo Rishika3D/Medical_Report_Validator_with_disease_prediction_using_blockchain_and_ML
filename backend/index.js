@@ -6,12 +6,13 @@ import PdfParse from 'pdf-parse';
 import fs from 'fs';
 import path from 'path';
 import { keccak256 } from 'js-sha3';
+import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
 import { createHelia } from 'helia';
 import { strings } from '@helia/strings';
-import contractJSON from './abi/ReportValidator.json' assert { type: 'json' }; // 👈 ABI import
+import contractJSON from './abi/ReportValidator.json' assert { type: 'json' };
 
 dotenv.config();
 
@@ -45,16 +46,21 @@ const upload = multer({
   }
 });
 
-// 🧠 Ethers setup
+// Ethers setup
 const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-const contract = new ethers.Contract(
-  process.env.CONTRACT_ADDRESS,
-  contractJSON.abi,
-  signer
-);
+const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractJSON.abi, signer);
 
-// 📤 Upload Endpoint
+// AES encryption function for IPFS storage
+const encryptText = (text) => {
+  const key = crypto.createHash('sha256').update(String(process.env.ENCRYPTION_KEY)).digest('base64').slice(0, 32);
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(key), iv);
+  let encrypted = cipher.update(text, 'utf8', 'base64');
+  encrypted += cipher.final('base64');
+  return { iv: iv.toString('base64'), data: encrypted };
+};
+
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
@@ -74,12 +80,21 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     fs.unlinkSync(file.path);
 
-    // Upload to IPFS and generate hash
-    const textCID = await s.addString(text);
-    const hash = keccak256(text);
+    // Normalize text for hashing
+    const normalizedText = text.replace(/\s+/g, ' ').trim().toLowerCase();
+
+    // Hash for verification
+    const hash = keccak256(normalizedText);
+
+    // Encrypt text for IPFS
+    const encrypted = encryptText(normalizedText);
+    const encryptedPayload = JSON.stringify(encrypted);
+
+    // Upload encrypted text to IPFS
+    const textCID = await s.addString(encryptedPayload);
     const hashCID = await s.addString(hash);
 
-    //  Smart contract call
+    // Smart contract call
     const tx = await contract.uploadReport('0x' + hash, textCID.toString());
     await tx.wait();
 
